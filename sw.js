@@ -1,8 +1,8 @@
 // Service worker : la caisse reste utilisable sans internet et se met à jour dès que le réseau revient.
-const CACHE = 'kartel-bbs-v2';
+const CACHE = 'kartel-bbs-v3';
 const SHELL = [
   './', 'index.html', 'app.css', 'manifest.webmanifest',
-  'js/app.js', 'js/logic.js', 'js/catalog.js', 'js/store.js', 'js/demo.js',
+  'js/app.js', 'js/logic.js', 'js/catalog.js', 'js/store.js', 'js/demo.js', 'js/cloud.js',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
 ];
 

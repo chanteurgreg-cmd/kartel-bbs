@@ -6,6 +6,7 @@ import {
 import { defaultState, DEFAULT_CATALOG, GROUPS } from './catalog.js';
 import { demoState } from './demo.js';
 import * as store from './store.js';
+import * as cloud from './cloud.js';
 
 const DEMO = new URLSearchParams(location.search).has('demo');
 const DAY = 86400000;
@@ -27,6 +28,7 @@ const ui = {
   enter: {}, // animations d'entrée à jouer une seule fois au prochain rendu (view, sale, other, modal)
   closing: false, // la fenêtre d'encaissement est en train de se refermer
   lastGroup: 'Coupes & barbe',
+  showKey: false, // code de récupération affiché en clair dans Réglages
 };
 
 const TABS = [
@@ -54,7 +56,8 @@ const barberName = (id) => S.barbers.find((b) => b.id === id)?.name ?? 'Inconnu'
 const activeBarbers = () => S.barbers.filter((b) => b.active);
 const openShift = (id, now = Date.now()) => S.shifts.find((sh) => sh.barberId === id && sh.end == null && !isForgotten(sh, now));
 const priceText = (n) => String(n).replace('.', ',');
-const backupLate = () => !DEMO && S.tickets.length > 0 && (!S.meta.lastBackupAt || Date.now() - S.meta.lastBackupAt > 7 * DAY);
+const lastSafe = () => Math.max(S.meta.lastBackupAt || 0, S.meta.cloudAt || 0);
+const backupLate = () => !DEMO && S.tickets.length > 0 && Date.now() - lastSafe() > 2 * DAY;
 const familiesOf = (items) => {
   const present = [...new Set(items.map((p) => p.group || 'Autres'))];
   return [...GROUPS.filter((g) => present.includes(g)), ...present.filter((g) => !GROUPS.includes(g))];
@@ -65,8 +68,14 @@ function parsePrice(v) {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
 }
 
-function save(rerender = true) {
+// Enregistre dans la tablette, puis programme la copie en ligne.
+function persist() {
   store.save(S);
+  markDirty();
+}
+
+function save(rerender = true) {
+  persist();
   if (rerender) render();
 }
 
@@ -343,7 +352,7 @@ function pay(mode) {
   if (!s?.items.length || ui.closing) return;
   const t = { id: uid(), ts: Date.now(), barberId: s.barberId, pay: mode, items: s.items.map((it) => ({ ...it })) };
   S.tickets.push(t);
-  store.save(S);
+  persist();
   closeSale();
   toast(`${eur(ticketTotal(t))} en ${PAY_LABEL[mode]} · ${barberName(t.barberId)}`, () => {
     S.tickets = S.tickets.filter((x) => x.id !== t.id);
@@ -640,7 +649,15 @@ function reglagesView() {
     ${catalogEditor('produits', 'Produits en vente')}
     <p class="group-foot">Les tickets déjà encaissés gardent le prix du moment.</p>
 
-    <h3 class="group-title">Données</h3>
+    <h3 class="group-title">Sauvegarde automatique</h3>
+    <div class="group">
+      ${DEMO ? '<p class="row muted">Désactivée en mode démo.</p>' : `
+        <div class="row"><span class="row-label">État</span><span class="sync-state ${sync.status}" id="sync-state">${esc(syncLabel())}</span><button class="btn sm" data-action="sync-now">Sauvegarder maintenant</button></div>
+        <div class="row"><span class="row-label">Code de récupération</span><span class="key-mask">${ui.showKey ? cloud.formatKey(S.meta.salonKey) : `••••-••••-${S.meta.salonKey.slice(8)}`}</span><button class="btn sm plain" data-action="toggle-key">${ui.showKey ? 'Masquer' : 'Afficher'}</button></div>`}
+    </div>
+    <p class="group-foot">Chaque encaissement part en sécurité en ligne dans les minutes qui suivent, même si internet revient plus tard. Si la tablette est perdue ou cassée, ce code permet de tout récupérer sur une nouvelle. Garde-le pour toi.</p>
+
+    <h3 class="group-title">Fichiers</h3>
     <div class="group${backupLate() ? ' warn' : ''}">
       <div class="data-grid">
         <div class="data-box">
@@ -655,16 +672,16 @@ function reglagesView() {
           </div>
         </div>
         <div class="data-box">
-          <h4>Sauvegarde</h4>
-          <p class="muted">Dernière sauvegarde : ${S.meta.lastBackupAt ? `${fmtDate(S.meta.lastBackupAt)} à ${fmtTime(S.meta.lastBackupAt)}` : 'jamais'}</p>
+          <h4>Copie en fichier</h4>
+          <p class="muted">Dernière copie : ${S.meta.lastBackupAt ? `${fmtDate(S.meta.lastBackupAt)} à ${fmtTime(S.meta.lastBackupAt)}` : 'jamais'}</p>
           <div class="addrow">
-            <button class="btn primary sm" data-action="backup">Sauvegarder</button>
+            <button class="btn primary sm" data-action="backup">Créer une copie</button>
             <label class="btn sm file">Restaurer<input type="file" accept=".json,application/json" data-change="restore"></label>
           </div>
         </div>
       </div>
     </div>
-    <p class="group-foot">Les chiffres sont enregistrés dans cette tablette uniquement. Fais une sauvegarde chaque semaine et garde le fichier en lieu sûr (mail, WhatsApp, Drive).</p>
+    <p class="group-foot">Export pour Excel ou Google Sheets, et copie de secours en fichier si tu veux en garder une toi-même (mail, WhatsApp, Drive).</p>
 
     <h3 class="group-title">Installer sur la tablette</h3>
     <div class="group">
@@ -688,6 +705,7 @@ function setupView() {
       <h1 class="wordmark xl">Kartel BBS</h1>
       <p class="kicker">Caisse du comptoir</p>
     </div>`;
+  if (d.recover) return recoverView(head);
   if (d.step === 1) {
     return `
       <div class="setup">
@@ -705,7 +723,10 @@ function setupView() {
           </div>
           <button type="button" class="btn primary lg block" data-action="setup-next">Continuer</button>
         </form>
-        <label class="btn plain file restore-link">Restaurer une sauvegarde<input type="file" accept=".json,application/json" data-change="restore"></label>
+        <div class="setup-links">
+          <button type="button" class="btn plain" data-action="recover-open">Récupérer un salon avec son code</button>
+          <label class="btn plain file">Restaurer un fichier de sauvegarde<input type="file" accept=".json,application/json" data-change="restore"></label>
+        </div>
       </div>`;
   }
   return `
@@ -734,6 +755,23 @@ function setupView() {
           </div>
           <div class="setup-actions"><button type="button" class="btn plain" data-action="setup-back">Retour</button></div>`}
       </div>
+    </div>`;
+}
+
+function recoverView(head) {
+  return `
+    <div class="setup">
+      ${head}
+      <form class="setup-card glass" data-submit="recover">
+        <p class="step-n">Récupération</p>
+        <h2 class="setup-title">Récupérer un salon</h2>
+        <p class="muted">Tape le code de récupération de l'ancienne tablette (Réglages, Sauvegarde automatique).</p>
+        <label class="field"><span>Code de récupération</span><input class="input code-in" name="code" placeholder="XXXX-XXXX-XXXX" maxlength="16" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+        <div class="setup-actions">
+          <button type="button" class="btn plain" data-action="recover-cancel">Retour</button>
+          <button class="btn primary lg">Récupérer</button>
+        </div>
+      </form>
     </div>`;
 }
 
@@ -766,6 +804,9 @@ function setupDone() {
   save();
   window.scrollTo(0, 0);
   toast('Caisse prête');
+  if (!DEMO) {
+    infoBox('Voici ton code de récupération. Prends-le en photo : si la tablette est perdue ou cassée, il permet de tout récupérer sur une nouvelle. Tu le retrouves aussi dans Réglages.', "C'est noté", cloud.formatKey(S.meta.salonKey));
+  }
 }
 
 const setupFor = (s) => (!s.salon.name ? { step: 1, name: '', barbers: [] } : s.meta.setupDone === false ? { step: 2, chosen: true } : null);
@@ -806,7 +847,7 @@ async function backup() {
   if (!(await share(name, JSON.stringify(S), 'application/json'))) return;
   S.meta.lastBackupAt = now.getTime();
   save();
-  toast('Sauvegarde créée');
+  toast('Copie créée');
 }
 
 async function restore(file) {
@@ -824,8 +865,11 @@ async function restore(file) {
     'Remplacer',
     () => {
       S = data;
+      ensureCloudIds();
+      sync.claim = true;
+      sync.status = 'idle';
       ui.setup = setupFor(S);
-      store.save(S);
+      persist();
       toast('Sauvegarde restaurée');
     },
   );
@@ -839,14 +883,21 @@ function confirmBox(text, ok, onOk) {
   render();
 }
 
+function infoBox(text, ok, code = '') {
+  ui.modal = { text, ok, onOk: () => {}, info: true, code };
+  ui.enter.modal = true;
+  render();
+}
+
 function modalView() {
   const anim = ui.enter.modal ? ' enter' : '';
   return `
     <div class="modal-back${anim}">
       <div class="modal${anim}" role="alertdialog" aria-modal="true" aria-labelledby="modal-text">
         <p id="modal-text" class="m-text">${esc(ui.modal.text)}</p>
-        <div class="m-actions">
-          <button class="btn" data-action="modal-cancel">Annuler</button>
+        ${ui.modal.code ? `<p class="m-code">${esc(ui.modal.code)}</p>` : ''}
+        <div class="m-actions${ui.modal.info ? ' single' : ''}">
+          ${ui.modal.info ? '' : '<button class="btn" data-action="modal-cancel">Annuler</button>'}
           <button class="btn primary" data-action="modal-ok">${esc(ui.modal.ok)}</button>
         </div>
       </div>
@@ -874,6 +925,99 @@ toastEl.addEventListener('click', (e) => {
   toastEl.classList.remove('show');
   fn();
 });
+
+// ——— Sauvegarde automatique en ligne ———
+
+const SYNC_EVERY = 3 * 60000; // au plus une copie toutes les 3 minutes pendant l'activité
+const sync = { status: 'idle', error: '', at: 0, dirty: false, busy: false, claim: false, timer: 0 };
+
+// Identifiant propre à cet appareil (jamais inclus dans les sauvegardes).
+function deviceId() {
+  try {
+    let id = localStorage.getItem('kartel-bbs-device');
+    if (!id) {
+      id = cloud.newDeviceId();
+      localStorage.setItem('kartel-bbs-device', id);
+    }
+    return id;
+  } catch {
+    deviceId.mem ??= cloud.newDeviceId();
+    return deviceId.mem;
+  }
+}
+
+function ensureCloudIds() {
+  if (!S.meta.salonKey) S.meta.salonKey = cloud.newKey();
+}
+
+function since(ts) {
+  const m = Math.round((Date.now() - ts) / 60000);
+  if (m < 1) return "à l'instant";
+  if (m < 60) return `il y a ${m} min`;
+  return `le ${fmtDate(ts)} à ${fmtTime(ts)}`;
+}
+
+function syncLabel() {
+  switch (sync.status) {
+    case 'sending': return 'Envoi en cours…';
+    case 'ok': return `À jour, dernière copie ${since(sync.at)}`;
+    case 'offline': return "En attente d'internet, rien n'est perdu";
+    case 'error': return 'Échec, nouvel essai dans une minute';
+    case 'owner': return 'Arrêtée : ce code a été repris sur un autre appareil';
+    default: return S.meta.cloudAt ? `Dernière copie ${since(S.meta.cloudAt)}` : 'Première copie dans quelques secondes';
+  }
+}
+
+function setSync(status, error = '') {
+  sync.status = status;
+  sync.error = error;
+  const el = document.getElementById('sync-state');
+  if (el) {
+    el.textContent = syncLabel();
+    el.className = `sync-state ${status}`;
+  }
+}
+
+function scheduleSync(delay) {
+  clearTimeout(sync.timer);
+  sync.timer = setTimeout(runSync, delay);
+}
+
+function markDirty() {
+  if (DEMO || !S?.meta?.salonKey || sync.status === 'owner') return;
+  sync.dirty = true;
+  if (!sync.busy) scheduleSync(Math.max(5000, sync.at + SYNC_EVERY - Date.now()));
+}
+
+async function runSync() {
+  if (DEMO || sync.busy || !sync.dirty || ui.setup || !S.meta.salonKey) return;
+  if (!navigator.onLine) { setSync('offline'); return; }
+  sync.busy = true;
+  sync.dirty = false;
+  setSync('sending');
+  try {
+    await cloud.upload(S, deviceId(), { claim: sync.claim });
+    sync.claim = false;
+    sync.at = Date.now();
+    S.meta.cloudAt = sync.at;
+    store.save(S);
+    setSync('ok');
+  } catch (err) {
+    sync.dirty = true;
+    if (err.status === 409) {
+      setSync('owner');
+    } else {
+      setSync(navigator.onLine ? 'error' : 'offline', err.message);
+      if (navigator.onLine) scheduleSync(60000);
+    }
+  } finally {
+    sync.busy = false;
+    if (sync.dirty && sync.status === 'ok') scheduleSync(Math.max(5000, sync.at + SYNC_EVERY - Date.now()));
+  }
+}
+
+window.addEventListener('online', () => { if (sync.dirty && sync.status !== 'owner') scheduleSync(2000); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && sync.dirty) runSync(); });
 
 // ——— Événements ———
 
@@ -982,14 +1126,14 @@ app.addEventListener('click', (e) => {
       if (!t) break;
       confirmBox(`Supprimer le ticket de ${eur(ticketTotal(t))} (${barberName(t.barberId)}, ${fmtTime(t.ts)}) ?`, 'Supprimer', () => {
         S.tickets = S.tickets.filter((x) => x.id !== id);
-        store.save(S);
+        persist();
       });
       break;
     }
     case 'del-shift':
       confirmBox('Supprimer ce pointage ?', 'Supprimer', () => {
         S.shifts = S.shifts.filter((x) => x.id !== id);
-        store.save(S);
+        persist();
       });
       break;
     case 'barber-leave': {
@@ -999,7 +1143,7 @@ app.addEventListener('click', (e) => {
         b.active = false;
         const sh = openShift(b.id);
         if (sh) sh.end = Date.now();
-        store.save(S);
+        persist();
       });
       break;
     }
@@ -1017,7 +1161,7 @@ app.addEventListener('click', (e) => {
       if (!p) break;
       confirmBox(`Retirer « ${p.name} » de la carte ? Les tickets passés ne changent pas.`, 'Retirer', () => {
         S.catalog[list] = S.catalog[list].filter((x) => x.id !== id);
-        store.save(S);
+        persist();
       });
       break;
     }
@@ -1030,7 +1174,7 @@ app.addEventListener('click', (e) => {
     case 'demo-reset':
       confirmBox('Recharger les données de démo ?', 'Recharger', () => {
         S = demoState();
-        store.save(S);
+        persist();
       });
       break;
     case 'setup-remove':
@@ -1054,6 +1198,27 @@ app.addEventListener('click', (e) => {
       break;
     case 'setup-done':
       setupDone();
+      break;
+    case 'recover-open':
+      ui.setup.name = document.getElementById('setup-salon')?.value ?? ui.setup.name;
+      ui.setup.recover = true;
+      render();
+      break;
+    case 'recover-cancel':
+      ui.setup.recover = false;
+      render();
+      break;
+    case 'toggle-key':
+      ui.showKey = !ui.showKey;
+      render();
+      break;
+    case 'sync-now':
+      if (sync.status === 'owner') {
+        sync.claim = true;
+        sync.status = 'idle';
+      }
+      sync.dirty = true;
+      runSync();
       break;
     case 'modal-ok': {
       const fn = ui.modal.onOk;
@@ -1141,6 +1306,34 @@ app.addEventListener('submit', (e) => {
       document.getElementById('setup-barber').focus();
       break;
     }
+    case 'recover': {
+      const key = cloud.normalizeKey(f.get('code'));
+      if (key.length !== 12) { toast('Le code fait 12 caractères'); break; }
+      const btn = form.querySelector('.btn.primary');
+      btn.disabled = true;
+      btn.textContent = 'Recherche…';
+      cloud.download(key, deviceId())
+        .then((data) => {
+          if (!validateState(data.state)) throw new Error('state');
+          const at = Date.parse(data.at);
+          confirmBox(`Récupérer « ${data.salon || 'Salon'} » (${plural(data.tickets, 'ticket', 'tickets')}, dernière copie le ${fmtDate(at)} à ${fmtTime(at)}) ? Cette tablette reprend la sauvegarde automatique de ce salon.`, 'Récupérer', () => {
+            S = data.state;
+            S.meta.salonKey = key;
+            S.meta.setupDone = true;
+            sync.claim = true;
+            sync.status = 'idle';
+            ui.setup = setupFor(S);
+            persist();
+            toast('Salon récupéré');
+          });
+        })
+        .catch((err) => {
+          btn.disabled = false;
+          btn.textContent = 'Récupérer';
+          toast(err.status === 404 ? 'Aucune sauvegarde pour ce code' : 'Sauvegarde injoignable, vérifie internet');
+        });
+      break;
+    }
     case 'barber-add': {
       const name = String(f.get('name') || '').trim();
       if (!name) break;
@@ -1221,7 +1414,8 @@ async function init() {
     data = null;
   }
   S = data || defaultState();
-  store.save(S);
+  if (!DEMO) ensureCloudIds();
+  persist();
   ui.setup = setupFor(S);
   ui.enter.view = true;
   render();
