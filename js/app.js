@@ -7,6 +7,7 @@ import { defaultState, DEFAULT_CATALOG, GROUPS } from './catalog.js';
 import { demoState } from './demo.js';
 import * as store from './store.js';
 import * as cloud from './cloud.js';
+import { mergeStates, stampChanges } from './merge.js';
 
 const DEMO = new URLSearchParams(location.search).has('demo');
 const DAY = 86400000;
@@ -15,6 +16,7 @@ const toastEl = document.getElementById('toast');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
 let S = null; // état complet (voir la spec)
+let snap = null; // photo de l'état au dernier enregistrement, pour dater chaque modification (js/merge.js)
 const ui = {
   view: 'comptoir',
   stats: { kind: 'day', anchor: Date.now() },
@@ -28,7 +30,9 @@ const ui = {
   enter: {}, // animations d'entrée à jouer une seule fois au prochain rendu (view, sale, other, modal)
   closing: false, // la fenêtre d'encaissement est en train de se refermer
   lastGroup: 'Coupes & barbe',
-  showKey: false, // code de récupération affiché en clair dans Réglages
+  showKey: false, // code du salon affiché en clair dans Réglages
+  salons: null, // vue « Mes salons » : null, 'loading' ou la liste avec les chiffres de chaque salon
+  stale: false, // des nouveautés sont arrivées pendant une saisie : écran à rafraîchir
 };
 
 const TABS = [
@@ -68,10 +72,12 @@ function parsePrice(v) {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
 }
 
-// Enregistre dans la tablette, puis programme la copie en ligne.
+// Date les modifications, enregistre dans l'appareil, puis programme l'envoi en ligne.
 function persist() {
-  store.save(S);
+  if (!DEMO) snap = stampChanges(S, snap);
   markDirty();
+  store.save(S);
+  registerSalon();
 }
 
 function save(rerender = true) {
@@ -109,10 +115,11 @@ const LOGO = '<svg class="logo" viewBox="0 0 100 100" aria-hidden="true"><circle
 const VIEWS = { comptoir: comptoirView, chiffres: chiffresView, classement: classementView, historique: historiqueView, reglages: reglagesView };
 
 function render() {
-  document.body.classList.toggle('locked', Boolean(ui.sale || ui.other || ui.modal));
+  ui.stale = false;
+  document.body.classList.toggle('locked', Boolean(ui.sale || ui.other || ui.modal || ui.salons));
   const scroll = {};
   app.querySelectorAll('[data-scroll]').forEach((el) => { scroll[el.dataset.scroll] = el.scrollTop; });
-  const overlays = `${ui.sale ? saleView() : ''}${ui.other ? otherView() : ''}${ui.modal ? modalView() : ''}`;
+  const overlays = `${ui.salons ? salonsView() : ''}${ui.sale ? saleView() : ''}${ui.other ? otherView() : ''}${ui.modal ? modalView() : ''}`;
   app.innerHTML = ui.setup
     ? setupView() + overlays
     : `${headerView()}<main class="view view-${ui.view}${ui.enter.view ? ' enter' : ''}">${VIEWS[ui.view]()}</main>${tabbarView('dock')}${overlays}`;
@@ -130,7 +137,9 @@ function headerView() {
           ${LOGO}
           <div class="brand-txt">
             <span class="wordmark">Kartel BBS</span>
-            <span class="brand-sub"><span class="salon-name">${esc(S.salon.name)}</span> · ${esc(new Date(now).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
+            <span class="brand-sub">${salonList().length > 1 && !DEMO
+              ? `<button class="salon-switch" data-action="salons"><span class="salon-name">${esc(S.salon.name)}</span>${ic('chev')}</button>`
+              : `<span class="salon-name">${esc(S.salon.name)}</span>`} · ${esc(new Date(now).toLocaleDateString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
           </div>
           ${DEMO ? '<span class="badge">Démo</span>' : ''}
         </div>
@@ -649,13 +658,28 @@ function reglagesView() {
     ${catalogEditor('produits', 'Produits en vente')}
     <p class="group-foot">Les tickets déjà encaissés gardent le prix du moment.</p>
 
-    <h3 class="group-title">Sauvegarde automatique</h3>
+    <h3 class="group-title">Synchronisation et sauvegarde</h3>
     <div class="group">
       ${DEMO ? '<p class="row muted">Désactivée en mode démo.</p>' : `
-        <div class="row"><span class="row-label">État</span><span class="sync-state ${sync.status}" id="sync-state">${esc(syncLabel())}</span><button class="btn sm" data-action="sync-now">Sauvegarder maintenant</button></div>
-        <div class="row"><span class="row-label">Code de récupération</span><span class="key-mask">${ui.showKey ? cloud.formatKey(S.meta.salonKey) : `••••-••••-${S.meta.salonKey.slice(8)}`}</span><button class="btn sm plain" data-action="toggle-key">${ui.showKey ? 'Masquer' : 'Afficher'}</button></div>`}
+        <div class="row"><span class="row-label">État</span><span class="sync-state ${sync.status}" id="sync-state">${esc(syncLabel())}</span><button class="btn sm" data-action="sync-now">Synchroniser</button></div>
+        <div class="row"><span class="row-label">Code du salon</span><span class="key-mask">${ui.showKey ? cloud.formatKey(S.meta.salonKey) : `••••-••••-${S.meta.salonKey.slice(8)}`}</span><button class="btn sm plain" data-action="toggle-key">${ui.showKey ? 'Masquer' : 'Afficher'}</button></div>`}
     </div>
-    <p class="group-foot">Chaque encaissement part en sécurité en ligne dans les minutes qui suivent, même si internet revient plus tard. Si la tablette est perdue ou cassée, ce code permet de tout récupérer sur une nouvelle. Garde-le pour toi.</p>
+    <p class="group-foot">Tout ce qui est fait ici part en ligne dans les secondes qui suivent, même si internet revient plus tard, et arrive sur les autres appareils du salon. Ce code ouvre le salon sur un autre appareil (téléphone du patron, nouvelle tablette) : garde-le pour toi.</p>
+
+    ${DEMO ? '' : `
+    <h3 class="group-title">Salons sur cet appareil</h3>
+    <div class="group">
+      ${salonList().map((x) => `
+        <div class="row">
+          <span class="row-label grow">${esc(x.name)}${x.slot === currentSlot() ? ' <span class="muted">(affiché)</span>' : ''}</span>
+          ${x.slot === currentSlot() ? '' : `<button class="btn sm" data-action="salon-open" data-slot="${esc(x.slot)}">Ouvrir</button><button class="btn sm plain" data-action="salon-forget" data-slot="${esc(x.slot)}">Retirer</button>`}
+        </div>`).join('')}
+      <form class="row add-row" data-submit="salon-add">
+        <input class="input grow code-in" name="code" placeholder="Code d'un autre salon : XXXX-XXXX-XXXX" maxlength="16" autocomplete="off" autocapitalize="characters" spellcheck="false" required aria-label="Code d'un autre salon">
+        <button class="btn primary sm">${ic('plus')} Ajouter</button>
+      </form>
+    </div>
+    <p class="group-foot">Passe d'un salon à l'autre en touchant son nom en haut de l'écran.</p>`}
 
     <h3 class="group-title">Fichiers</h3>
     <div class="group${backupLate() ? ' warn' : ''}">
@@ -724,7 +748,7 @@ function setupView() {
           <button type="button" class="btn primary lg block" data-action="setup-next">Continuer</button>
         </form>
         <div class="setup-links">
-          <button type="button" class="btn plain" data-action="recover-open">Récupérer un salon avec son code</button>
+          <button type="button" class="btn plain" data-action="recover-open">Ouvrir un salon existant avec son code</button>
           <label class="btn plain file">Restaurer un fichier de sauvegarde<input type="file" accept=".json,application/json" data-change="restore"></label>
         </div>
       </div>`;
@@ -763,13 +787,13 @@ function recoverView(head) {
     <div class="setup">
       ${head}
       <form class="setup-card glass" data-submit="recover">
-        <p class="step-n">Récupération</p>
-        <h2 class="setup-title">Récupérer un salon</h2>
-        <p class="muted">Tape le code de récupération de l'ancienne tablette (Réglages, Sauvegarde automatique).</p>
-        <label class="field"><span>Code de récupération</span><input class="input code-in" name="code" placeholder="XXXX-XXXX-XXXX" maxlength="16" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+        <p class="step-n">Salon existant</p>
+        <h2 class="setup-title">Ouvrir un salon</h2>
+        <p class="muted">Tape le code du salon : sur sa tablette, Réglages, Synchronisation et sauvegarde. Tout l'historique arrive sur cet appareil et reste synchronisé.</p>
+        <label class="field"><span>Code du salon</span><input class="input code-in" name="code" placeholder="XXXX-XXXX-XXXX" maxlength="16" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
         <div class="setup-actions">
           <button type="button" class="btn plain" data-action="recover-cancel">Retour</button>
-          <button class="btn primary lg">Récupérer</button>
+          <button class="btn primary lg">Ouvrir</button>
         </div>
       </form>
     </div>`;
@@ -805,7 +829,7 @@ function setupDone() {
   window.scrollTo(0, 0);
   toast('Caisse prête');
   if (!DEMO) {
-    infoBox('Voici ton code de récupération. Prends-le en photo : si la tablette est perdue ou cassée, il permet de tout récupérer sur une nouvelle. Tu le retrouves aussi dans Réglages.', "C'est noté", cloud.formatKey(S.meta.salonKey));
+    infoBox('Voici le code du salon. Prends-le en photo : il ouvre le salon sur ton téléphone, et sur une nouvelle tablette si celle-ci est perdue ou cassée. Tu le retrouves aussi dans Réglages.', "C'est noté", cloud.formatKey(S.meta.salonKey));
   }
 }
 
@@ -864,15 +888,47 @@ async function restore(file) {
     `Remplacer toutes les données de cette tablette par la sauvegarde « ${data.salon.name || 'sans nom'} » (${plural(data.tickets.length, 'ticket', 'tickets')}) ?`,
     'Remplacer',
     () => {
-      S = data;
+      // Le fichier remplace l'état affiché : l'écart avec l'état d'avant est daté comme des modifications,
+      // qui partent ensuite sur les autres appareils du salon.
+      const key = S.meta.salonKey;
+      S = { ...data, meta: { ...data.meta, salonKey: key || data.meta.salonKey } };
       ensureCloudIds();
-      sync.claim = true;
-      sync.status = 'idle';
       ui.setup = setupFor(S);
       persist();
       toast('Sauvegarde restaurée');
     },
   );
+}
+
+// ——— Mes salons (téléphone du patron) ———
+
+function salonsView() {
+  const anim = ui.enter.salons ? ' enter' : '';
+  const rows = Array.isArray(ui.salons) ? ui.salons : null;
+  const sum = (k, f) => (rows || []).reduce((n, r) => n + (r[k]?.[f] || 0), 0);
+  const line = (r) => `
+    <button class="salon-card${r.slot === currentSlot() ? ' current' : ''}" data-action="salon-open" data-slot="${esc(r.slot)}">
+      <span class="sc-name">${esc(r.name)}${r.slot === currentSlot() ? '<span class="sc-tag">Affiché</span>' : ''}</span>
+      ${r.day ? `
+        <span class="sc-figs">
+          <span><small>Aujourd'hui</small><strong>${eur(r.day.ca)}</strong><small>${plural(r.day.coupes, 'coupe', 'coupes')}</small></span>
+          <span><small>Ce mois</small><strong>${eur(r.month.ca)}</strong><small>${plural(r.month.tickets, 'ticket', 'tickets')}</small></span>
+        </span>` : '<span class="muted">Pas encore de données sur cet appareil</span>'}
+      ${ic('chev')}
+    </button>`;
+  return `
+    <div class="modal-back${anim}" data-action="salons-close">
+      <div class="modal salons-panel${anim}" role="dialog" aria-modal="true" aria-labelledby="salons-title" data-stop>
+        <div class="sp-head"><h2 id="salons-title">Mes salons</h2><button class="icon-btn glass" data-action="salons-close" aria-label="Fermer">${ic('x')}</button></div>
+        ${rows ? `
+          ${rows.length > 1 ? `
+            <div class="salon-total">
+              <span><small>Total aujourd'hui</small><strong>${eur(sum('day', 'ca'))}</strong></span>
+              <span><small>Total du mois</small><strong>${eur(sum('month', 'ca'))}</strong></span>
+            </div>` : ''}
+          ${rows.map(line).join('')}` : '<p class="muted pad">Mise à jour des salons…</p>'}
+      </div>
+    </div>`;
 }
 
 // ——— Confirmations et notifications ———
@@ -926,10 +982,13 @@ toastEl.addEventListener('click', (e) => {
   fn();
 });
 
-// ——— Sauvegarde automatique en ligne ———
+// ——— Synchronisation en ligne ———
+// Chaque modification part en ligne quelques secondes après ; les modifications des autres appareils
+// (tablettes du salon, téléphone du patron) arrivent à l'ouverture, au retour sur l'app et chaque minute.
 
-const SYNC_EVERY = 3 * 60000; // au plus une copie toutes les 3 minutes pendant l'activité
-const sync = { status: 'idle', error: '', at: 0, dirty: false, busy: false, claim: false, timer: 0 };
+const PUSH_DELAY = 4000;
+const PULL_EVERY = 60000;
+const sync = { status: 'idle', at: 0, dirty: false, busy: false, timer: 0 };
 
 // Identifiant propre à cet appareil (jamais inclus dans les sauvegardes).
 function deviceId() {
@@ -959,18 +1018,16 @@ function since(ts) {
 
 function syncLabel() {
   switch (sync.status) {
-    case 'sending': return 'Envoi en cours…';
-    case 'ok': return `À jour, dernière copie ${since(sync.at)}`;
+    case 'sending': return 'Synchronisation…';
+    case 'ok': return `À jour, synchronisé ${since(sync.at)}`;
     case 'offline': return "En attente d'internet, rien n'est perdu";
     case 'error': return 'Échec, nouvel essai dans une minute';
-    case 'owner': return 'Arrêtée : ce code a été repris sur un autre appareil';
-    default: return S.meta.cloudAt ? `Dernière copie ${since(S.meta.cloudAt)}` : 'Première copie dans quelques secondes';
+    default: return S.meta.cloudAt ? `Synchronisé ${since(S.meta.cloudAt)}` : 'Première synchronisation dans quelques secondes';
   }
 }
 
-function setSync(status, error = '') {
+function setSync(status) {
   sync.status = status;
-  sync.error = error;
   const el = document.getElementById('sync-state');
   if (el) {
     el.textContent = syncLabel();
@@ -978,52 +1035,262 @@ function setSync(status, error = '') {
   }
 }
 
+const canSync = () => !DEMO && !ui.setup && Boolean(S?.meta?.salonKey);
+
 function scheduleSync(delay) {
   clearTimeout(sync.timer);
   sync.timer = setTimeout(runSync, delay);
 }
 
+// Une modification attend en ligne : la marque est gardée dans l'état, au cas où l'app est fermée avant l'envoi.
 function markDirty() {
-  if (DEMO || !S?.meta?.salonKey || sync.status === 'owner') return;
+  if (DEMO || !S?.meta?.salonKey) return;
   sync.dirty = true;
-  if (!sync.busy) scheduleSync(Math.max(5000, sync.at + SYNC_EVERY - Date.now()));
+  S.meta.pending = true;
+  if (!sync.busy) scheduleSync(PUSH_DELAY);
+}
+
+// Ajoute à l'état affiché ce qui vient d'ailleurs, sans perdre ce qui a été fait ici pendant l'échange.
+function applyRemote(remote, at) {
+  const r = mergeStates(S, remote);
+  S = r.state;
+  snap = stampChanges(S, null);
+  if (at) S.meta.remoteAt = at;
+  store.save(S);
+  if (r.changed) refresh();
+  return r.changed;
+}
+
+// Rafraîchit l'écran, sauf pendant une saisie : ce sera fait au prochain affichage.
+function refresh() {
+  const typing = document.activeElement?.matches?.('input, select, textarea');
+  if (ui.sale || ui.other || ui.modal || ui.setup || ui.salons || typing) {
+    ui.stale = true;
+    return;
+  }
+  render();
 }
 
 async function runSync() {
-  if (DEMO || sync.busy || !sync.dirty || ui.setup || !S.meta.salonKey) return;
+  clearTimeout(sync.timer);
+  if (!canSync() || sync.busy) return;
   if (!navigator.onLine) { setSync('offline'); return; }
   sync.busy = true;
-  sync.dirty = false;
+  const key = S.meta.salonKey;
+  const pushing = sync.dirty;
   setSync('sending');
   try {
-    await cloud.upload(S, deviceId(), { claim: sync.claim });
-    sync.claim = false;
+    if (pushing) {
+      sync.dirty = false;
+      const res = await cloud.upload(S, deviceId());
+      if (S.meta.salonKey !== key) return; // salon changé pendant l'envoi
+      if (!sync.dirty) S.meta.pending = false;
+      applyRemote(res.state, Date.parse(res.at));
+    } else {
+      const res = await cloud.download(key, deviceId(), S.meta.remoteAt);
+      if (S.meta.salonKey !== key) return;
+      if (!res.same) applyRemote(res.state, Date.parse(res.at));
+    }
     sync.at = Date.now();
     S.meta.cloudAt = sync.at;
     store.save(S);
     setSync('ok');
   } catch (err) {
-    sync.dirty = true;
-    if (err.status === 409) {
-      setSync('owner');
+    if (pushing) sync.dirty = true;
+    // Salon pas encore en ligne (tout nouveau) : le premier envoi le crée.
+    if (err.status === 404) {
+      sync.dirty = true;
+      scheduleSync(1000);
     } else {
-      setSync(navigator.onLine ? 'error' : 'offline', err.message);
-      if (navigator.onLine) scheduleSync(60000);
+      setSync(navigator.onLine ? 'error' : 'offline');
     }
   } finally {
     sync.busy = false;
-    if (sync.dirty && sync.status === 'ok') scheduleSync(Math.max(5000, sync.at + SYNC_EVERY - Date.now()));
+    if (sync.dirty && sync.status !== 'offline') scheduleSync(sync.status === 'error' ? 60000 : PUSH_DELAY);
+    else if (!sync.dirty) scheduleSync(PULL_EVERY);
   }
 }
 
-window.addEventListener('online', () => { if (sync.dirty && sync.status !== 'owner') scheduleSync(2000); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && sync.dirty) runSync(); });
+window.addEventListener('online', () => scheduleSync(1000));
+document.addEventListener('visibilitychange', () => {
+  // En quittant l'app : on envoie tout de suite ; en revenant : on va chercher les nouveautés.
+  if (document.visibilityState === 'hidden') { if (sync.dirty) runSync(); }
+  else scheduleSync(300);
+});
+
+// ——— Plusieurs salons sur le même appareil (téléphone du patron) ———
+// Liste rangée sur l'appareil : [{ key, slot, name }] ; « state » est la case du premier salon.
+
+function salonList() {
+  try {
+    return JSON.parse(localStorage.getItem('kartel-bbs-salons')) || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSalonList(list) {
+  try {
+    localStorage.setItem('kartel-bbs-salons', JSON.stringify(list));
+  } catch {
+    // Stockage bloqué : l'appareil garde au moins le salon affiché.
+  }
+}
+
+function currentSlot() {
+  try {
+    return localStorage.getItem('kartel-bbs-current') || 'state';
+  } catch {
+    return 'state';
+  }
+}
+
+function setCurrentSlot(slot) {
+  try {
+    localStorage.setItem('kartel-bbs-current', slot);
+  } catch {
+    // Sans stockage, l'appareil rouvrira le premier salon.
+  }
+}
+
+// Tient la liste à jour avec le salon affiché (code et nom).
+function registerSalon() {
+  if (DEMO || !S?.meta?.salonKey) return;
+  const slot = currentSlot();
+  const list = salonList();
+  const entry = list.find((x) => x.slot === slot);
+  const name = S.salon.name || 'Salon';
+  if (entry && entry.key === S.meta.salonKey && entry.name === name) return;
+  if (entry) Object.assign(entry, { key: S.meta.salonKey, name });
+  else list.unshift({ key: S.meta.salonKey, slot, name });
+  saveSalonList(list);
+}
+
+async function openSlot(slot) {
+  if (sync.dirty) await runSync();
+  clearTimeout(sync.timer);
+  setCurrentSlot(slot);
+  store.useKey(slot);
+  const data = await store.load();
+  if (!validateState(data)) { toast('Salon illisible sur cet appareil'); return; }
+  S = data;
+  snap = stampChanges(S, null);
+  Object.assign(sync, { status: 'idle', at: 0, dirty: Boolean(S.meta.pending), busy: false });
+  ui.salons = null;
+  ui.setup = setupFor(S);
+  ui.enter.view = true;
+  ui.sale = null;
+  render();
+  window.scrollTo(0, 0);
+  scheduleSync(300);
+}
+
+// Ajoute un salon déjà en ligne à cet appareil, à partir de son code, et l'affiche.
+async function addSalon(key, data) {
+  const state = data.state;
+  state.meta = { ...state.meta, salonKey: key, setupDone: true, cloudAt: Date.now(), remoteAt: Date.parse(data.at), pending: false };
+  const list = salonList();
+  const slot = `salon-${key}`;
+  list.push({ key, slot, name: state.salon.name || data.salon || 'Salon' });
+  saveSalonList(list);
+  await store.saveSlot(slot, state);
+  await openSlot(slot);
+  toast(`${state.salon.name || 'Salon'} ajouté à cet appareil`);
+}
+
+// Lien personnel du patron : …/#patron=CODE1,CODE2. Il le touche une fois, ses salons s'ouvrent sur son
+// téléphone, sans rien taper. Le lien reste dans l'adresse : l'icône de l'écran d'accueil le garde aussi.
+const patronKeys = () => {
+  const m = location.hash.match(/patron=([A-Za-z0-9,-]+)/);
+  return m ? [...new Set(m[1].split(',').map(cloud.normalizeKey).filter((k) => k.length === 12))] : [];
+};
+
+// L'icône ajoutée à l'écran d'accueil s'ouvre sur ce lien (et non sur l'adresse nue).
+function personalManifest() {
+  const link = document.querySelector('link[rel="manifest"]');
+  if (!link) return;
+  fetch(link.href)
+    .then((r) => r.json())
+    .then((m) => {
+      const base = new URL('./', location.href).href;
+      const icons = m.icons.map((i) => ({ ...i, src: new URL(i.src, base).href }));
+      const blob = new Blob([JSON.stringify({ ...m, start_url: location.href, scope: base, id: base, icons })], { type: 'application/manifest+json' });
+      link.href = URL.createObjectURL(blob);
+    })
+    .catch(() => {});
+}
+
+async function openFromLink(keys) {
+  personalManifest();
+  const known = salonList();
+  const missing = keys.filter((k) => !known.some((x) => x.key === k));
+  if (!missing.length) return;
+  if (!navigator.onLine) { toast('Connecte-toi à internet pour ouvrir tes salons'); return; }
+  const found = [];
+  for (const key of missing) {
+    try {
+      const data = await cloud.download(key, deviceId());
+      if (validateState(data.state)) found.push({ key, data });
+    } catch {
+      // Code inconnu ou réseau coupé : les autres salons s'ouvrent quand même.
+    }
+  }
+  if (!found.length) { toast('Salons introuvables, vérifie internet'); return; }
+  // Appareil neuf : le premier salon prend la place de la caisse vide.
+  const fresh = !S.salon.name && !S.tickets.length;
+  let first = null;
+  for (const { key, data } of found) {
+    const state = data.state;
+    state.meta = { ...state.meta, salonKey: key, setupDone: true, cloudAt: Date.now(), remoteAt: Date.parse(data.at), pending: false };
+    let slot = `salon-${key}`;
+    if (fresh && !first) {
+      slot = currentSlot();
+      saveSalonList(salonList().filter((x) => x.slot !== slot));
+    }
+    const list = salonList();
+    list.push({ key, slot, name: state.salon.name || data.salon || 'Salon' });
+    saveSalonList(list);
+    await store.saveSlot(slot, state);
+    first ??= slot;
+  }
+  await openSlot(fresh ? first : currentSlot());
+  toast(found.length > 1 ? `Tes ${found.length} salons sont sur ce téléphone` : `${found[0].data.state.salon.name || 'Ton salon'} est sur ce téléphone`);
+}
+
+// Chiffres du jour et du mois de chaque salon, pour la vue « Mes salons ». Les autres salons sont mis à jour en ligne.
+async function loadSalonsOverview() {
+  const now = Date.now();
+  const rows = await Promise.all(salonList().map(async (x) => {
+    let st = x.slot === currentSlot() ? S : await store.loadSlot(x.slot);
+    if (x.slot !== currentSlot() && validateState(st) && navigator.onLine) {
+      try {
+        const res = await cloud.download(x.key, deviceId(), st.meta.remoteAt);
+        if (!res.same) {
+          st = mergeStates(st, res.state).state;
+          st.meta.remoteAt = Date.parse(res.at);
+          await store.saveSlot(x.slot, st);
+        }
+      } catch {
+        // Hors ligne ou salon injoignable : on affiche la dernière version connue.
+      }
+    }
+    if (!validateState(st)) return { ...x, day: null, month: null };
+    if (st.salon.name && st.salon.name !== x.name) x.name = st.salon.name;
+    return {
+      ...x,
+      day: computeStats(st, periodRange('day', now), now),
+      month: computeStats(st, periodRange('month', now), now),
+    };
+  }));
+  saveSalonList(rows.map(({ key, slot, name }) => ({ key, slot, name })));
+  return rows;
+}
 
 // ——— Événements ———
 
 app.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-action]');
-  if (!el || el.disabled || ui.closing) return;
+  const el = e.target.closest('[data-action], [data-stop]');
+  if (!el || el.hasAttribute('data-stop') || el.disabled || ui.closing) return;
   const label = document.getElementById('other-label');
   if (label && ui.other) ui.other.label = label.value;
   const { id } = el.dataset;
@@ -1213,13 +1480,33 @@ app.addEventListener('click', (e) => {
       render();
       break;
     case 'sync-now':
-      if (sync.status === 'owner') {
-        sync.claim = true;
-        sync.status = 'idle';
-      }
-      sync.dirty = true;
       runSync();
       break;
+    case 'salons':
+      ui.salons = 'loading';
+      ui.enter.salons = true;
+      render();
+      loadSalonsOverview().then((rows) => {
+        if (!ui.salons) return;
+        ui.salons = rows;
+        render();
+      });
+      break;
+    case 'salons-close':
+      ui.salons = null;
+      render();
+      break;
+    case 'salon-open':
+      openSlot(el.dataset.slot);
+      break;
+    case 'salon-forget': {
+      const x = salonList().find((y) => y.slot === el.dataset.slot);
+      if (!x) break;
+      confirmBox(`Retirer « ${x.name} » de cet appareil ? Ses données restent en ligne et sur ses tablettes ; son code permet de le rajouter.`, 'Retirer', () => {
+        saveSalonList(salonList().filter((y) => y.slot !== x.slot));
+      });
+      break;
+    }
     case 'modal-ok': {
       const fn = ui.modal.onOk;
       ui.modal = null;
@@ -1316,21 +1603,41 @@ app.addEventListener('submit', (e) => {
         .then((data) => {
           if (!validateState(data.state)) throw new Error('state');
           const at = Date.parse(data.at);
-          confirmBox(`Récupérer « ${data.salon || 'Salon'} » (${plural(data.tickets, 'ticket', 'tickets')}, dernière copie le ${fmtDate(at)} à ${fmtTime(at)}) ? Cette tablette reprend la sauvegarde automatique de ce salon.`, 'Récupérer', () => {
+          confirmBox(`Ouvrir « ${data.salon || 'Salon'} » sur cet appareil (${plural(data.tickets, 'ticket', 'tickets')}, mis à jour le ${fmtDate(at)} à ${fmtTime(at)}) ? Il restera synchronisé avec les autres appareils du salon.`, 'Ouvrir', () => {
             S = data.state;
-            S.meta.salonKey = key;
-            S.meta.setupDone = true;
-            sync.claim = true;
-            sync.status = 'idle';
+            S.meta = { ...S.meta, salonKey: key, setupDone: true, remoteAt: at, cloudAt: Date.now(), pending: false };
+            snap = stampChanges(S, null);
+            Object.assign(sync, { status: 'ok', at: Date.now(), dirty: false });
             ui.setup = setupFor(S);
-            persist();
-            toast('Salon récupéré');
+            ui.enter.view = true;
+            store.save(S);
+            registerSalon();
+            render();
+            scheduleSync(PULL_EVERY);
+            toast('Salon ouvert');
           });
         })
         .catch((err) => {
           btn.disabled = false;
-          btn.textContent = 'Récupérer';
-          toast(err.status === 404 ? 'Aucune sauvegarde pour ce code' : 'Sauvegarde injoignable, vérifie internet');
+          btn.textContent = 'Ouvrir';
+          toast(err.status === 404 ? 'Aucun salon avec ce code' : 'Connexion impossible, vérifie internet');
+        });
+      break;
+    }
+    case 'salon-add': {
+      const key = cloud.normalizeKey(f.get('code'));
+      if (key.length !== 12) { toast('Le code fait 12 caractères'); break; }
+      if (salonList().some((x) => x.key === key)) { toast('Ce salon est déjà sur cet appareil'); break; }
+      const btn = form.querySelector('.btn.primary');
+      btn.disabled = true;
+      cloud.download(key, deviceId())
+        .then((data) => {
+          if (!validateState(data.state)) throw new Error('state');
+          return addSalon(key, data);
+        })
+        .catch((err) => {
+          btn.disabled = false;
+          toast(err.status === 404 ? 'Aucun salon avec ce code' : 'Connexion impossible, vérifie internet');
         });
       break;
     }
@@ -1374,9 +1681,17 @@ app.addEventListener('submit', (e) => {
   }
 });
 
+// Nouveautés arrivées pendant une saisie : l'écran se met à jour une fois le champ quitté.
+app.addEventListener('focusout', () => {
+  setTimeout(() => {
+    if (ui.stale && !document.activeElement?.matches?.('input, select, textarea')) refresh();
+  }, 0);
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || ui.closing) return;
   if (ui.modal) { ui.modal = null; render(); return; }
+  if (ui.salons) { ui.salons = null; render(); return; }
   if (ui.other) { ui.other = null; render(); return; }
   if (ui.sale && !ui.sale.items.length) closeSale();
 });
@@ -1397,7 +1712,8 @@ setInterval(() => {
 // ——— Démarrage ———
 
 async function init() {
-  store.useKey(DEMO ? 'demo' : 'main');
+  const slot = DEMO ? 'demo' : currentSlot();
+  store.useKey(slot);
   let data = null;
   try {
     data = await store.load();
@@ -1414,11 +1730,18 @@ async function init() {
     data = null;
   }
   S = data || defaultState();
-  if (!DEMO) ensureCloudIds();
-  persist();
+  snap = DEMO ? null : stampChanges(S, null);
+  if (!DEMO) {
+    ensureCloudIds();
+    sync.dirty = Boolean(S.meta.pending);
+    store.save(S);
+    registerSalon();
+  }
   ui.setup = setupFor(S);
   ui.enter.view = true;
   render();
+  if (!DEMO) scheduleSync(sync.dirty ? 1000 : 300);
+  if (!DEMO && patronKeys().length) openFromLink(patronKeys());
   store.persist();
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

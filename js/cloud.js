@@ -1,5 +1,5 @@
-// Sauvegarde automatique en ligne : une copie compressée de l'état part vers Supabase (fonction kartel-backup).
-// Le salon est identifié par un code de récupération de 12 caractères, généré sur la tablette.
+// Sauvegarde et synchronisation en ligne (fonction Supabase kartel-backup) : tablettes du salon et téléphone du
+// patron partagent le même état. Le salon est identifié par un code de 12 caractères, généré sur la tablette.
 const ENDPOINT = 'https://xrtpqsddxwyipqftqrgk.supabase.co/functions/v1/kartel-backup';
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sans I ni O, pour éviter les confusions à la saisie
 
@@ -21,10 +21,10 @@ async function pack(text) {
   return { body: await new Response(stream).arrayBuffer(), enc: 'gzip' };
 }
 
-async function call(action, key, device, { body, enc, claim } = {}) {
+async function call(action, key, device, { body, enc, since } = {}) {
   const query = new URLSearchParams({ action, key, device });
   if (enc) query.set('enc', enc);
-  if (claim) query.set('claim', '1');
+  if (since) query.set('since', String(since));
   const res = await fetch(`${ENDPOINT}?${query}`, {
     method: 'POST',
     body,
@@ -39,10 +39,11 @@ async function call(action, key, device, { body, enc, claim } = {}) {
   return data;
 }
 
-// claim : cet appareil reprend la sauvegarde du salon (après une récupération sur une nouvelle tablette).
-export async function upload(state, device, { claim = false } = {}) {
+// Envoie l'état de cet appareil ; la réponse contient l'état fusionné avec celui des autres appareils.
+export async function upload(state, device) {
   const { body, enc } = await pack(JSON.stringify(state));
-  return call('save', state.meta.salonKey, device, { body, enc, claim });
+  return call('sync', state.meta.salonKey, device, { body, enc });
 }
 
-export const download = (key, device) => call('load', key, device);
+// since : date de la dernière version reçue ; la réponse est { same: true } si rien n'a bougé depuis.
+export const download = (key, device, since = 0) => call('load', key, device, { since });

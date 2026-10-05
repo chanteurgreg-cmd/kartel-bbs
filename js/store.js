@@ -5,9 +5,33 @@ let key = 'state';
 let dbPromise = null;
 let queue = Promise.resolve();
 
-// Le mode démo écrit sous une autre clé : jamais mélangé aux vraies données du salon.
-export function useKey(mode) {
-  key = mode === 'demo' ? 'state-demo' : 'state';
+// Chaque salon a sa case (« state » pour le premier de l'appareil, « salon-CODE » pour les suivants) ;
+// le mode démo écrit dans la sienne, jamais mélangée aux vraies données.
+export function useKey(slot) {
+  key = slot === 'demo' ? 'state-demo' : slot;
+}
+
+// Lecture et écriture d'une autre case que celle du salon affiché (vue « Mes salons »).
+export async function loadSlot(slot) {
+  try {
+    return (await run('readonly', (s) => s.get(slot))) ?? null;
+  } catch {
+    const raw = localStorage.getItem('kartel-bbs-' + slot);
+    return raw ? JSON.parse(raw) : null;
+  }
+}
+
+export function saveSlot(slot, state) {
+  queue = queue
+    .then(() => run('readwrite', (s) => s.put(state, slot)))
+    .catch(() => {
+      try {
+        localStorage.setItem('kartel-bbs-' + slot, JSON.stringify(state));
+      } catch {
+        // Stockage plein ou bloqué : la copie en ligne reste la référence.
+      }
+    });
+  return queue;
 }
 
 function openDb() {
@@ -32,28 +56,10 @@ function run(mode, op) {
   }));
 }
 
-export async function load() {
-  try {
-    return (await run('readonly', (s) => s.get(key))) ?? null;
-  } catch {
-    const raw = localStorage.getItem('kartel-bbs-' + key);
-    return raw ? JSON.parse(raw) : null;
-  }
-}
+export const load = () => loadSlot(key);
 
 // Les écritures sont enchaînées pour ne jamais s'écraser dans le désordre.
-export function save(state) {
-  queue = queue
-    .then(() => run('readwrite', (s) => s.put(state, key)))
-    .catch(() => {
-      try {
-        localStorage.setItem('kartel-bbs-' + key, JSON.stringify(state));
-      } catch {
-        // Stockage plein ou bloqué : l'interface reste utilisable, la sauvegarde fichier reste possible.
-      }
-    });
-  return queue;
-}
+export const save = (state) => saveSlot(key, state);
 
 // Demande au navigateur de ne jamais effacer ces données pour faire de la place.
 export async function persist() {
