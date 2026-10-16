@@ -840,3 +840,25 @@ tfoot th, tfoot td { border-bottom: 0; background: rgba(255, 255, 255, .03); fon
 .sc-figs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sc-figs strong { font-size: 19px; }
 .salon-card:active { transform: scale(.985); }
+
+/* ——— Code patron ——— */
+.lock-card { display: grid; justify-items: center; gap: 10px; padding: 34px 22px; text-align: center; }
+.lock-card h3 { margin: 4px 0 0; font-size: 21px; letter-spacing: -.02em; }
+.lock-card p { max-width: 34ch; margin: 0 0 8px; }
+.lock-ic { display: grid; place-items: center; width: 56px; height: 56px; border-radius: 50%; background: rgba(255, 255, 255, .08); }
+.lock-ic .ic { width: 26px; height: 26px; }
+.lock-bar { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; padding: 8px 8px 8px 14px; border: 1px solid var(--hairline); border-radius: var(--r-lg); background: var(--surface); font-size: 14px; color: var(--label-2); }
+.lock-bar span { flex: 1; min-width: 0; }
+.lock-bar .ic { width: 18px; height: 18px; flex: none; }
+.lock-bar.open { border-color: rgba(48, 209, 88, .45); color: var(--label); }
+.pin-modal { width: min(340px, 100%); justify-items: stretch; text-align: center; }
+.pin-sub { margin: -8px 0 0; }
+.pin-dots { display: flex; justify-content: center; gap: 16px; margin: 6px 0 0; }
+.pin-dots i { width: 15px; height: 15px; border: 2px solid var(--label-2); border-radius: 50%; transition: background .12s, border-color .12s; }
+.pin-dots i.on { border-color: var(--label); background: var(--label); }
+.pin-error { min-height: 20px; margin: 0; font-size: 14px; color: var(--red); }
+.pin-modal.shake { animation: shake .35s var(--ease) both; }
+@keyframes shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
+@media (prefers-reduced-motion: reduce) { .pin-modal.shake { animation: none; } }
+.t-warn { color: var(--orange); font-weight: 600; }
+.shift .tfield b { margin-left: 4px; color: var(--label); font-variant-numeric: tabular-nums; }

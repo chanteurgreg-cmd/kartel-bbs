@@ -33,6 +33,8 @@ const ui = {
   showKey: false, // code du salon affiché en clair dans Réglages
   salons: null, // vue « Mes salons » : null, 'loading' ou la liste avec les chiffres de chaque salon
   stale: false, // des nouveautés sont arrivées pendant une saisie : écran à rafraîchir
+  pin: null, // pavé du code patron : { mode: 'check' | 'new' | 'confirm', digits, first, then, error }
+  unlockedUntil: 0, // tablette ouverte par le code patron jusqu'à cette heure
 };
 
 const TABS = [
@@ -100,6 +102,7 @@ const ICONS = {
   chart: '<path d="M4 19.5h16M7.5 16v-4.5M12 16V7M16.5 16V10"/>',
   podium: '<path d="M9 19.5V8.5h6v11M3.5 19.5v-7H9M15 19.5v-5h5.5v5M2.5 19.5h19"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  lock: '<rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/>',
   sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
 };
 const ic = (name) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -116,10 +119,10 @@ const VIEWS = { comptoir: comptoirView, chiffres: chiffresView, classement: clas
 
 function render() {
   ui.stale = false;
-  document.body.classList.toggle('locked', Boolean(ui.sale || ui.other || ui.modal || ui.salons));
+  document.body.classList.toggle('locked', Boolean(ui.sale || ui.other || ui.modal || ui.salons || ui.pin));
   const scroll = {};
   app.querySelectorAll('[data-scroll]').forEach((el) => { scroll[el.dataset.scroll] = el.scrollTop; });
-  const overlays = `${ui.salons ? salonsView() : ''}${ui.sale ? saleView() : ''}${ui.other ? otherView() : ''}${ui.modal ? modalView() : ''}`;
+  const overlays = `${ui.salons ? salonsView() : ''}${ui.sale ? saleView() : ''}${ui.other ? otherView() : ''}${ui.modal ? modalView() : ''}${ui.pin ? pinView() : ''}`;
   app.innerHTML = ui.setup
     ? setupView() + overlays
     : `${headerView()}<main class="view view-${ui.view}${ui.enter.view ? ' enter' : ''}">${VIEWS[ui.view]()}</main>${tabbarView('dock')}${overlays}`;
@@ -363,11 +366,8 @@ function pay(mode) {
   S.tickets.push(t);
   persist();
   closeSale();
-  toast(`${eur(ticketTotal(t))} en ${PAY_LABEL[mode]} · ${barberName(t.barberId)}`, () => {
-    S.tickets = S.tickets.filter((x) => x.id !== t.id);
-    save();
-    toast('Encaissement annulé');
-  });
+  // Pas d'annulation ici : seul le patron supprime un ticket (Historique, avec son code).
+  toast(`${eur(ticketTotal(t))} en ${PAY_LABEL[mode]} · ${barberName(t.barberId)}`);
 }
 
 // ——— Barre de période (Chiffres, Classement, Historique) ———
@@ -502,10 +502,11 @@ function historiqueView() {
   const team = activeBarbers();
   return `
     <h2 class="large-title">Historique</h2>
+    ${lockBar('Pour supprimer un ticket ou corriger un pointage')}
     ${forgotten.length ? `
       <h3 class="group-title">Départ oublié</h3>
       <div class="group warn">${forgotten.map((sh) => shiftRow(sh, true)).join('')}</div>
-      <p class="group-foot">Indique l'heure de départ pour que ces heures soient comptées.</p>
+      <p class="group-foot">${isBoss() ? "Indique l'heure de départ pour que ces heures soient comptées." : 'Le patron corrige ce départ avec son code.'}</p>
       <div class="top-gap"></div>` : ''}
     ${periodBar('hist', ['day'])}
     <p class="daysum"><b>${eur(st.ca)}</b><span class="t-cb">CB ${eur(st.cb)}</span><span class="t-esp">Espèces ${eur(st.especes)}</span><span>${plural(st.tickets, 'ticket', 'tickets')}</span></p>
@@ -514,7 +515,7 @@ function historiqueView() {
     <h3 class="group-title">Pointages</h3>
     <div class="group">
       ${shifts.length ? shifts.map((sh) => shiftRow(sh, false)).join('') : '<p class="row muted">Aucun pointage ce jour-là.</p>'}
-      ${team.length ? `
+      ${team.length && isBoss() ? `
         <form class="row add-row shift-add" data-submit="shift-add">
           <select class="input" name="barber" aria-label="Barber">${team.map((b) => `<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select>
           <label class="tfield">Arrivée <input class="input" type="time" name="start" required></label>
@@ -531,12 +532,23 @@ const ticketRow = (t) => `
     <time>${fmtTime(t.ts)}</time>
     <span class="tk-main"><span class="tk-who">${esc(barberName(t.barberId))}</span><span class="tk-what">${esc(summary(t))}</span></span>
     <b class="tk-total">${eur(ticketTotal(t))}</b>
-    <button class="paytag ${t.pay}" data-action="toggle-pay" data-id="${t.id}" aria-label="Payé en ${PAY_LABEL[t.pay]}, toucher pour changer">${PAY_LABEL[t.pay]}</button>
-    <button class="icon-btn danger" data-action="del-ticket" data-id="${t.id}" aria-label="Supprimer ce ticket">${ic('trash')}</button>
+    ${isBoss() ? `
+      <button class="paytag ${t.pay}" data-action="toggle-pay" data-id="${t.id}" aria-label="Payé en ${PAY_LABEL[t.pay]}, toucher pour changer">${PAY_LABEL[t.pay]}</button>
+      <button class="icon-btn danger" data-action="del-ticket" data-id="${t.id}" aria-label="Supprimer ce ticket">${ic('trash')}</button>`
+    : `<span class="paytag ${t.pay}">${PAY_LABEL[t.pay]}</span>`}
   </div>`;
 
 function shiftRow(sh, withDate) {
   const late = isForgotten(sh);
+  if (!isBoss()) {
+    return `
+    <div class="row shift" data-shift="${sh.id}">
+      <span class="sh-who">${esc(barberName(sh.barberId))}${withDate ? `<small>${fmtDate(sh.start)}</small>` : ''}</span>
+      <span class="tfield">Arrivée <b>${fmtTime(sh.start)}</b></span>
+      <span class="tfield">Départ <b>${sh.end ? fmtTime(sh.end) : '—'}</b></span>
+      <span class="sh-dur${late ? ' late' : ''}">${late ? 'à corriger' : hoursLabel(shiftDuration(sh))}</span>
+    </div>`;
+  }
   return `
     <div class="row shift" data-shift="${sh.id}">
       <span class="sh-who">${esc(barberName(sh.barberId))}${withDate ? `<small>${fmtDate(sh.start)}</small>` : ''}</span>
@@ -623,6 +635,16 @@ function flushAddRows() {
 // ——— Réglages ———
 
 function reglagesView() {
+  if (!isBoss()) {
+    return `
+      <h2 class="large-title">Réglages</h2>
+      <div class="card lock-card">
+        <span class="lock-ic">${ic('lock')}</span>
+        <h3>Réservé au patron</h3>
+        <p class="muted">Tarifs, équipe, exports et sauvegarde : tape le code patron pour y accéder.</p>
+        <button class="btn primary lg" data-action="unlock">Entrer le code</button>
+      </div>`;
+  }
   const team = activeBarbers();
   const gone = S.barbers.filter((b) => !b.active);
   const months = [...new Set([monthKey(Date.now()), ...S.tickets.map((t) => monthKey(t.ts))])].sort().reverse();
@@ -657,6 +679,17 @@ function reglagesView() {
     ${catalogEditor('prestations', 'Carte des prestations')}
     ${catalogEditor('produits', 'Produits en vente')}
     <p class="group-foot">Les tickets déjà encaissés gardent le prix du moment.</p>
+
+    ${DEMO ? '' : `
+    <h3 class="group-title">Code patron</h3>
+    <div class="group">
+      <div class="row">
+        <span class="row-label grow">${S.salon.pin ? 'Code choisi' : '<b class="t-warn">Pas encore choisi</b>'}</span>
+        <button class="btn sm${S.salon.pin ? '' : ' primary'}" data-action="pin-set">${S.salon.pin ? 'Changer le code' : 'Choisir le code'}</button>
+        ${!patronDevice() && Date.now() < ui.unlockedUntil ? '<button class="btn sm plain" data-action="lock">Verrouiller</button>' : ''}
+      </div>
+    </div>
+    <p class="group-foot">Sur les tablettes, les barbers encaissent et pointent ; supprimer un ticket, corriger un pointage et ouvrir les Réglages demandent ce code à 4 chiffres. Après 5 minutes, la tablette se reverrouille toute seule. Sur ton téléphone, pas besoin de code.</p>`}
 
     <h3 class="group-title">Synchronisation et sauvegarde</h3>
     <div class="group">
@@ -898,6 +931,149 @@ async function restore(file) {
       toast('Sauvegarde restaurée');
     },
   );
+}
+
+// ——— Code patron ———
+// Les barbers encaissent et pointent ; supprimer, corriger et régler demandent le code à 4 chiffres d'Adam.
+// Le code est rangé dans le salon (empreinte seulement), donc identique sur toutes les tablettes.
+// Le téléphone du patron (ouvert par son lien personnel) n'a jamais besoin du code.
+
+const UNLOCK_FOR = 5 * 60000;
+const PIN_TRIES = 5;
+const pinFails = { n: 0, until: 0 };
+
+function patronDevice() {
+  try {
+    if (localStorage.getItem('kartel-bbs-patron') === '1') return true;
+  } catch {
+    // Stockage bloqué : on se fie au nombre de salons.
+  }
+  return salonList().length > 1;
+}
+
+const isBoss = () => DEMO || patronDevice() || Date.now() < ui.unlockedUntil;
+
+async function pinHash(pin) {
+  const data = new TextEncoder().encode(`kartel-bbs:${pin}`);
+  const buf = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Lance `then` tout de suite si le patron est là, sinon après le bon code.
+function askPin(then = () => render()) {
+  if (isBoss()) { then(); return; }
+  if (!S.salon.pin) {
+    infoBox("Le code patron n'est pas encore choisi. Adam le choisit depuis son téléphone : Réglages, Code patron.", "D'accord");
+    return;
+  }
+  ui.pin = { mode: 'check', digits: '', then, error: '' };
+  ui.enter.pin = true;
+  render();
+}
+
+function lockBar(why) {
+  if (DEMO || patronDevice()) return '';
+  if (Date.now() < ui.unlockedUntil) {
+    return `<div class="lock-bar open">${ic('lock')}<span>Mode patron ouvert</span><button class="btn sm plain" data-action="lock">Verrouiller</button></div>`;
+  }
+  return `<div class="lock-bar">${ic('lock')}<span>${esc(why)}</span><button class="btn sm" data-action="unlock">Code patron</button></div>`;
+}
+
+function pinView() {
+  const p = ui.pin;
+  const anim = ui.enter.pin ? ' enter' : '';
+  const title = { check: 'Code patron', new: 'Choisis ton code', confirm: 'Retape le code' }[p.mode];
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'del'];
+  return `
+    <div class="modal-back${anim}">
+      <div class="modal pin-modal${anim}${p.error ? ' shake' : ''}" role="dialog" aria-modal="true" aria-labelledby="pin-title">
+        <h3 id="pin-title" class="m-title">${title}</h3>
+        <p class="muted pin-sub">${p.mode === 'check' ? 'Réservé à Adam.' : '4 chiffres, à garder pour toi.'}</p>
+        <div class="pin-dots" aria-label="${p.digits.length} chiffres sur 4">${[0, 1, 2, 3].map((i) => `<i${i < p.digits.length ? ' class="on"' : ''}></i>`).join('')}</div>
+        <p class="pin-error" aria-live="polite">${esc(p.error)}</p>
+        <div class="keypad">${keys.map((k) => (k ? `<button data-action="pin-key" data-k="${k}"${k === 'del' ? ' aria-label="Effacer"' : ''}>${k === 'del' ? '⌫' : k}</button>` : '<span></span>')).join('')}</div>
+        <button class="btn block" data-action="pin-cancel">Annuler</button>
+      </div>
+    </div>`;
+}
+
+async function pinKey(k) {
+  const p = ui.pin;
+  if (!p) return;
+  if (k === 'del') { p.digits = p.digits.slice(0, -1); render(); return; }
+  if (p.digits.length >= 4) return;
+  p.digits += k;
+  p.error = '';
+  render();
+  if (p.digits.length < 4) return;
+
+  if (p.mode === 'new') {
+    Object.assign(p, { mode: 'confirm', first: p.digits, digits: '' });
+    setTimeout(render, 150);
+    return;
+  }
+  if (p.mode === 'confirm') {
+    if (p.digits !== p.first) {
+      Object.assign(p, { mode: 'new', first: '', digits: '', error: 'Les deux codes ne sont pas pareils, recommence' });
+      render();
+      return;
+    }
+    const hash = await pinHash(p.digits);
+    ui.pin = null;
+    await setPinEverywhere(hash);
+    render();
+    toast('Code patron enregistré');
+    return;
+  }
+  // Vérification
+  if (Date.now() < pinFails.until) {
+    Object.assign(p, { digits: '', error: `Trop d'essais, attends ${Math.ceil((pinFails.until - Date.now()) / 1000)} s` });
+    render();
+    return;
+  }
+  if ((await pinHash(p.digits)) === S.salon.pin) {
+    pinFails.n = 0;
+    ui.unlockedUntil = Date.now() + UNLOCK_FOR;
+    const { then } = p;
+    ui.pin = null;
+    then();
+    render();
+    return;
+  }
+  pinFails.n += 1;
+  if (pinFails.n >= PIN_TRIES) {
+    pinFails.n = 0;
+    pinFails.until = Date.now() + 30000;
+  }
+  Object.assign(p, { digits: '', error: Date.now() < pinFails.until ? "Trop d'essais, attends 30 s" : 'Code incorrect' });
+  render();
+}
+
+// Le même code pour tous les salons de l'appareil (le téléphone d'Adam a ses deux salons).
+async function setPinEverywhere(hash) {
+  S.salon.pin = hash;
+  persist();
+  for (const x of salonList()) {
+    if (x.slot === currentSlot()) continue;
+    const st = await store.loadSlot(x.slot);
+    if (!validateState(st)) continue;
+    const before = stampChanges(st, null);
+    st.salon.pin = hash;
+    stampChanges(st, before);
+    st.meta.pending = true;
+    await store.saveSlot(x.slot, st);
+    if (navigator.onLine) {
+      try {
+        const res = await cloud.upload(st, deviceId());
+        const merged = mergeStates(st, res.state).state;
+        merged.meta.pending = false;
+        merged.meta.remoteAt = Date.parse(res.at);
+        await store.saveSlot(x.slot, merged);
+      } catch {
+        // Hors ligne : la marque « pending » l'enverra à la prochaine ouverture de ce salon.
+      }
+    }
+  }
 }
 
 // ——— Mes salons (téléphone du patron) ———
@@ -1222,6 +1398,11 @@ function personalManifest() {
 
 async function openFromLink(keys) {
   personalManifest();
+  try {
+    localStorage.setItem('kartel-bbs-patron', '1');
+  } catch {
+    // Sans stockage, le téléphone reconnaît le patron à ses deux salons.
+  }
   const known = salonList();
   const missing = keys.filter((k) => !known.some((x) => x.key === k));
   if (!missing.length) return;
@@ -1288,13 +1469,42 @@ async function loadSalonsOverview() {
 
 // ——— Événements ———
 
+// Actions réservées au patron (sur tablette, elles demandent le code).
+const BOSS_ACTIONS = new Set([
+  'toggle-pay', 'del-ticket', 'del-shift', 'barber-leave', 'barber-back', 'cat-del', 'export', 'backup',
+  'salon-open', 'salon-forget', 'pin-set', 'sync-now', 'toggle-key',
+]);
+const BOSS_CHANGES = new Set(['salon-name', 'barber-name', 'cat', 'shift-time', 'restore']);
+const BOSS_SUBMITS = new Set(['barber-add', 'cat-add', 'shift-add', 'salon-add']);
+
 app.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action], [data-stop]');
   if (!el || el.hasAttribute('data-stop') || el.disabled || ui.closing) return;
   const label = document.getElementById('other-label');
   if (label && ui.other) ui.other.label = label.value;
   const { id } = el.dataset;
+  if (BOSS_ACTIONS.has(el.dataset.action) && !isBoss()) { askPin(); return; }
   switch (el.dataset.action) {
+    case 'unlock':
+      askPin();
+      break;
+    case 'lock':
+      ui.unlockedUntil = 0;
+      render();
+      toast('Tablette verrouillée');
+      break;
+    case 'pin-set':
+      ui.pin = { mode: 'new', digits: '', then: () => {}, error: '' };
+      ui.enter.pin = true;
+      render();
+      break;
+    case 'pin-key':
+      pinKey(el.dataset.k);
+      break;
+    case 'pin-cancel':
+      ui.pin = null;
+      render();
+      break;
     case 'nav':
       ui.view = el.dataset.view;
       ui.enter.view = true;
@@ -1527,6 +1737,7 @@ app.addEventListener('click', (e) => {
 app.addEventListener('change', (e) => {
   const el = e.target.closest('[data-change]');
   if (!el) return;
+  if (!ui.setup && BOSS_CHANGES.has(el.dataset.change) && !isBoss()) { render(); askPin(); return; }
   const { id } = el.dataset;
   switch (el.dataset.change) {
     case 'salon-name': {
@@ -1583,6 +1794,7 @@ app.addEventListener('submit', (e) => {
   const form = e.target.closest('[data-submit]');
   if (!form) return;
   e.preventDefault();
+  if (!ui.setup && BOSS_SUBMITS.has(form.dataset.submit) && !isBoss()) { askPin(); return; }
   const f = new FormData(form);
   switch (form.dataset.submit) {
     case 'setup-add': {
@@ -1690,6 +1902,7 @@ app.addEventListener('focusout', () => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || ui.closing) return;
+  if (ui.pin) { ui.pin = null; render(); return; }
   if (ui.modal) { ui.modal = null; render(); return; }
   if (ui.salons) { ui.salons = null; render(); return; }
   if (ui.other) { ui.other = null; render(); return; }
@@ -1702,12 +1915,17 @@ setInterval(() => {
   const now = Date.now();
   const clock = document.getElementById('clock');
   if (clock) clock.textContent = fmtTime(now);
+  // Mode patron ouvert sur une tablette : il se referme tout seul au bout de 5 minutes.
+  if (ui.unlockedUntil && now >= ui.unlockedUntil) {
+    ui.unlockedUntil = 0;
+    if (S && !ui.sale && !ui.other && !ui.modal && !ui.pin) render();
+  }
   const today = periodRange('day', now).start;
   if (today !== dayStart && S && !ui.sale && !ui.other && !ui.modal && !ui.setup) {
     dayStart = today;
     render();
   }
-}, 20000);
+}, 10000);
 
 // ——— Démarrage ———
 
