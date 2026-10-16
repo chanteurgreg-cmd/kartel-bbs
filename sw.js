@@ -1,5 +1,5 @@
 // Service worker : la caisse reste utilisable sans internet et se met à jour dès que le réseau revient.
-const CACHE = 'kartel-bbs-v5';
+const CACHE = 'kartel-bbs-v6';
 const SHELL = [
   './', 'index.html', 'app.css', 'manifest.webmanifest',
   'js/app.js', 'js/logic.js', 'js/catalog.js', 'js/store.js', 'js/demo.js', 'js/cloud.js', 'js/merge.js',
@@ -33,7 +33,8 @@ self.addEventListener('fetch', (e) => {
 
   // Le site : réseau d'abord (dernière version), cache si pas de réseau ou réseau trop lent.
   if (url.origin === location.origin) {
-    const network = fetch(req).then((res) => put(req, res));
+    // no-cache : on redemande toujours au site s'il y a du nouveau (sinon le navigateur garde 10 min l'ancienne version).
+    const network = fetch(req, { cache: 'no-cache' }).then((res) => put(req, res));
     const slow = new Promise((_, reject) => setTimeout(() => reject(new Error('lent')), 4000));
     e.respondWith(
       Promise.race([network, slow]).catch(() => caches.match(req, { ignoreSearch: true })
